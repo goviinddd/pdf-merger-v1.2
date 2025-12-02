@@ -97,7 +97,7 @@ class PipelineOrchestrator:
 
                 else:
                     self.db.update_status(file_path, 'MANUAL_REVIEW', error="No PO Number found")
-                    logger.warning(f"⚠ Failed: Could not identify PO for {file_path}")
+                    logger.warning(f"Failed: Could not identify PO for {file_path}")
 
             except Exception as e:
                 logger.error(f"CRITICAL ERROR processing {file_path}: {e}")
@@ -120,22 +120,22 @@ class PipelineOrchestrator:
             
             # 1. Skip if incomplete
             if status == "INCOMPLETE":
-                logger.warning(f"🛑 Skipping merge for {po_number}: Partial delivery.")
+                logger.warning(f"Skipping merge for {po_number}: Partial delivery.")
                 continue
             
             # 2. Skip if PO Extraction Failed
             if status == "PO_DATA_MISSING":
-                logger.warning(f"🛑 Skipping merge for {po_number}: PO line items were not extracted.")
+                logger.warning(f"Skipping merge for {po_number}: PO line items were not extracted.")
                 continue
 
             # 3. CRITICAL FIX: Skip "Ghost Matches" (Empty vs Empty)
             if status == "MATCH" and not line_items:
-                logger.warning(f"🛑 Skipping merge for {po_number}: No items extracted from ANY document (Ghost Match).")
+                logger.warning(f"Skipping merge for {po_number}: No items extracted from ANY document (Ghost Match).")
                 continue
 
             # 4. Warn but allow merge if it's just weird extra items
             if status == "ATTENTION":
-                logger.warning(f"⚠️ Merging {po_number} with warnings (Unsolicited items).")
+                logger.warning(f"Merging {po_number} with warnings (Unsolicited items).")
 
             try:
                 merger = PdfWriter()

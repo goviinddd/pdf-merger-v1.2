@@ -15,7 +15,7 @@ load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not API_KEY:
-    logger.warning("⚠️ GEMINI_API_KEY not found in .env file. API features will fail.")
+    logger.warning("GEMINI_API_KEY not found in .env file. API features will fail.")
 
 # Configure Gemini
 genai.configure(api_key=API_KEY)
@@ -77,7 +77,7 @@ def extract_line_items_from_crop(image: Image.Image, retry_count=0):
 
     for model_name in candidate_models:
         try:
-            logger.info(f"🤖 Sending table crop to model: {model_name}")
+            logger.info(f"Sending table crop to model: {model_name}")
             model = genai.GenerativeModel(model_name)
             
             response = model.generate_content(
@@ -109,5 +109,5 @@ def extract_line_items_from_crop(image: Image.Image, retry_count=0):
             logger.error(f"Error with {model_name}: {e}")
             continue
 
-    logger.error("❌ All Gemini models failed to read the table crop.")
+    logger.error("All Gemini models failed to read the table crop.")
     return "[]"

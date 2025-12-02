@@ -32,7 +32,7 @@ class YoloExtractor(BaseTextExtractor):
             from rapidocr_onnxruntime import RapidOCR
             self.yolo_model = YOLO(self.model_path)
             self.ocr_engine = RapidOCR(det_use_cuda=False, cls_use_cuda=False, rec_use_cuda=False)
-            logger.info("✅ YOLO + RapidOCR loaded successfully.")
+            logger.info("YOLO + RapidOCR loaded successfully.")
             self._loaded = True
         except ImportError:
             logger.error("Missing dependencies.")
