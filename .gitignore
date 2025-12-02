@@ -1,0 +1,29 @@
+# Python System Files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment (Heavy!)
+venv/
+.venv/
+env/
+
+# Database (Client starts fresh)
+*.db
+*.sqlite3
+
+# The Data Folders (Client creates these locally)
+Purchase_order/
+Delivery_note/
+Sales_invoice/
+Merged_PDFs/
+Archive/
+Quarantine/
+Test_Zone/
+yolo_training/
+debug_crops/
+debug_yolo_crops/
+# Logs and Secrets
+*.log
+.env
+.DS_Store
