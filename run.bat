@@ -2,43 +2,57 @@
 TITLE Automated Invoice Merger Bot
 color 0A
 
-:: --- CONFIGURATION ---
-:: Check for Python
+:: Ensure we are running in the script's directory
+cd /d "%~dp0"
+
+:: --- CHECK FOR PYTHON ---
 python --version >nul 2>&1
 IF %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Python is not installed!
-    echo Please install Python 3.10+ from python.org and check "Add to PATH".
+    echo [ERROR] Python is not installed or not in PATH!
+    echo Please install Python 3.10+ and check "Add to PATH" during installation.
     pause
     exit /b
 )
 
 :: --- SETUP VIRTUAL ENV ---
 if not exist "venv" (
-    echo [INFO] First run detected. Setting up virtual environment...
+    echo [INFO] First run detected. Creating virtual environment...
     python -m venv venv
+    
+    echo [INFO] Activating environment...
     call venv\Scripts\activate
     
-    echo [INFO] Installing AI dependencies...
+    echo [INFO] Installing dependencies...
     pip install -r requirements.txt
     
-    echo [INFO] Downloading YOLO Model...
-    :: Note: Usually you include the .pt file in the zip, but this ensures pip is fresh
+    echo [INFO] Setup complete.
 ) else (
+    echo [INFO] Virtual environment found. Activating...
     call venv\Scripts\activate
+)
+
+:: --- VALIDATION ---
+if not exist "po_detector.pt" (
+    echo [WARNING] po_detector.pt is missing!
+    echo Please ensure the YOLO model file is in this folder.
+    pause
 )
 
 :: --- RUN THE BOT ---
 cls
 echo ========================================================
-echo    PDF MERGER BOT IS RUNNING (Do not close)
+echo    PDF MERGER BOT IS RUNNING
 echo ========================================================
 echo  [+] Watching: Purchase_order, Delivery_note, Sales_invoice
-echo  [+] Saving to: Merged_PDFs
-echo  [+] Mode: Auto-Pilot (Scanning every 10 seconds)
+echo  [+] AI Model: YOLO + Gemini Flash
+echo  [+] Status: Active (Looping every 10s)
 echo ========================================================
 echo.
 
-:: Run in loop mode, checking every 10 seconds
-python cli.py --loop --interval 10
+:: Run python from the venv explicitly to be safe
+venv\Scripts\python.exe cli.py --loop --interval 10
 
+:: If it crashes, keep window open so user can see error
+echo.
+echo [CRITICAL] The bot has stopped. See error above.
 pause
