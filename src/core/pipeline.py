@@ -52,7 +52,7 @@ class PipelineOrchestrator:
 
         for file_path, doc_type, current_status in pending_files:
             if not os.path.exists(file_path):
-                logger.warning(f"👻 File vanished: {file_path}. Marking as FAILED.")
+                logger.warning(f"File vanished: {file_path}. Marking as FAILED.")
                 self.db.update_status(file_path, 'FAILED', error="File Not Found on Disk")
                 continue
 
@@ -64,7 +64,7 @@ class PipelineOrchestrator:
 
                 if doc_info.po_number:
                     self.db.update_status(file_path, 'SUCCESS', po_number=doc_info.po_number)
-                    logger.info(f"✓ Solved: {doc_type.upper()} -> PO: {doc_info.po_number}")
+                    logger.info(f"Solved: {doc_type.upper()} -> PO: {doc_info.po_number}")
                     
                     # 2. Extract Line Items (YOLO Only)
                     if _yolo_extractor:
@@ -150,7 +150,7 @@ class PipelineOrchestrator:
                 if not file_paths_used: continue
 
                 output_path = self.fs.save_merged_pdf(merger, po_number)
-                logger.info(f"★ MERGED: {po_number} ({len(sorted_files)} docs) -> {output_path}")
+                logger.info(f"MERGED: {po_number} ({len(sorted_files)} docs) -> {output_path}")
 
                 for path in file_paths_used:
                     self.db.update_status(path, 'MERGED')
