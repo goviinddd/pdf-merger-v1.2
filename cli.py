@@ -3,6 +3,7 @@ import logging
 import argparse
 import time
 from pathlib import Path
+from src.core.reporter import ReportGenerator  # <--- Add this
 
 # Ensure Python finds the 'src' module
 sys.path.append(str(Path(__file__).parent))
@@ -62,6 +63,14 @@ def main():
     except Exception as e:
         logger.critical(f"Fatal System Crash: {e}", exc_info=True)
         sys.exit(1)
+    # --- REPORTING STEP ---
+    print("\ngenerating session report...")
+    reporter = ReportGenerator(orchestrator.db)
+    report_path = reporter.generate_excel_report()
+
+    if report_path:
+        print(f"SUCCESS: Report saved to -> {report_path}")
+        print("You can open this file in Excel to see missing items.")
 
 if __name__ == "__main__":
     main()

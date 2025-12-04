@@ -21,9 +21,13 @@ Archive/
 Quarantine/
 Test_Zone/
 yolo_training/
-debug_crops/
 debug_yolo_crops/
+reports/
+
 # Logs and Secrets
 *.log
 .env
 .DS_Store
+*.pdf
+*.png
+*.log	

@@ -1,10 +1,22 @@
-pypdf
-python-dotenv
+# --- Core Image Processing ---
+pillow
+opencv-python-headless
 pdf2image
+pypdfium2
+
+# --- AI & Vision ---
 ultralytics
 rapidocr-onnxruntime
-pypdfium2
-opencv-python-headless
-pillow
-pdfplumber
 google-generativeai
+
+# --- Data & Reporting (NEW) ---
+pandas
+openpyxl
+
+# --- Utilities ---
+python-dotenv
+reportlab
+
+# --- Legacy / Optional (Safe to keep) ---
+pypdf
+pdfplumber

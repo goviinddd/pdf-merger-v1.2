@@ -1,0 +1,34 @@
+# ==============================================================================
+# DOCUMENT CLASSIFICATION PATTERNS
+# ==============================================================================
+# The system checks these patterns against the document text to guess the type.
+# Format:
+#   document_type_name:
+#     - "regex_pattern_1"
+#     - "regex_pattern_2"
+
+document_types:
+  purchase_order:
+    - 'purchase\s?order'
+    - 'order\s?confirmation'
+    - 'procurement\s?ref'
+  
+  delivery_note:
+    - ^delivery[\s\W]+note
+    - 'dispatch\s?advice'
+    - 'packing\s?list'
+    - 'delivery\s?challan'
+  
+  sales_invoice:
+    - 'sales[\s\W]+invoice'
+    - 'tax\s?invoice'
+    - 'commercial\s?invoice'
+    - 'bill\s?of\s?supply'
+
+# ==============================================================================
+# DATA EXTRACTION PATTERNS (Future Use)
+# ==============================================================================
+extraction:
+  po_number:
+    - 'PO\s?[:#]\s?(\w+)'
+    - 'Order\s?No\.?\s?(\w+)'

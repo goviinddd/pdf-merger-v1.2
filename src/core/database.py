@@ -1,148 +1,150 @@
-# The Database Layer
 import sqlite3
-import logging
+import os
+import json
 from datetime import datetime
-from typing import Optional, List, Tuple
-
-logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path="merger_state.db"):
         self.db_path = db_path
         self._init_db()
 
-    def _get_connection(self):
+    def connect(self):
+        """Returns a raw connection (Used by Reporter)"""
         return sqlite3.connect(self.db_path)
 
     def _init_db(self):
-        """
-        Initializes the tables if they don't exist.
-        """
-        # 1. Main Files Table
-        query_files = """
-        CREATE TABLE IF NOT EXISTS files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT UNIQUE NOT NULL,
-            filename TEXT NOT NULL,
-            doc_type TEXT NOT NULL,
-            status TEXT DEFAULT 'PENDING',
-            po_number TEXT,
-            error_message TEXT,
-            retry_count INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
+        """Creates tables if they don't exist."""
+        conn = self.connect()
+        cursor = conn.cursor()
         
-        # 2. Line Items Table
-        query_items = """
-        CREATE TABLE IF NOT EXISTS line_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            po_number TEXT,
-            doc_type TEXT,
-            line_ref TEXT,
-            description TEXT,
-            part_no TEXT,
-            quantity REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-
-        with self._get_connection() as conn:
-            conn.execute(query_files)
-            conn.execute(query_items)
-            # Create indexes
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_po_number ON files(po_number);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_items_po ON line_items(po_number);")
-
-    def register_file(self, file_path: str, filename: str, doc_type: str) -> bool:
-        """Adds a new file to the queue. Returns False if it already exists."""
-        try:
-            with self._get_connection() as conn:
-                conn.execute(
-                    "INSERT INTO files (file_path, filename, doc_type) VALUES (?, ?, ?)",
-                    (file_path, filename, doc_type)
-                )
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
-    def update_status(self, file_path: str, status: str, po_number: Optional[str] = None, error: Optional[str] = None):
-        """Updates the state of a file."""
-        query = """
-        UPDATE files 
-        SET status = ?, po_number = COALESCE(?, po_number), error_message = ?, updated_at = ?
-        WHERE file_path = ?
-        """
-        with self._get_connection() as conn:
-            conn.execute(query, (status, po_number, error, datetime.now(), file_path))
-
-    def get_pending_files(self) -> List[Tuple[str, str, str]]:
-        """Fetches the next batch of work."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT file_path, doc_type, status FROM files WHERE status = 'PENDING'"
+        # 1. Files Table (Tracks status of every PDF)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT UNIQUE,
+                filename TEXT,
+                doc_type TEXT,
+                po_number TEXT,
+                status TEXT DEFAULT 'PENDING',
+                error_message TEXT,
+                last_updated TIMESTAMP
             )
-            return cursor.fetchall()
+        ''')
+
+        # 2. Line Items Table (Stores extracted data)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS line_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                po_number TEXT,
+                doc_type TEXT,
+                line_ref TEXT,
+                description TEXT,
+                part_no TEXT,
+                quantity REAL,
+                raw_json TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+
+    def register_file(self, file_path, filename, doc_type):
+        """Adds a new file to the DB if it doesn't exist."""
+        conn = self.connect()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT id FROM files WHERE file_path = ?", (file_path,))
+            if cursor.fetchone() is None:
+                cursor.execute('''
+                    INSERT INTO files (file_path, filename, doc_type, status, last_updated)
+                    VALUES (?, ?, ?, 'PENDING', ?)
+                ''', (file_path, filename, doc_type, datetime.now()))
+                conn.commit()
+                return True
+            return False
+        finally:
+            conn.close()
+
+    def get_pending_files(self):
+        """Returns files that need processing."""
+        conn = self.connect()
+        cursor = conn.cursor()
+        cursor.execute("SELECT file_path, doc_type, status FROM files WHERE status IN ('PENDING', 'FAILED')")
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def update_status(self, file_path, status, po_number=None, error=None):
+        """Updates the status of a file."""
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        updates = ["status = ?", "last_updated = ?"]
+        params = [status, datetime.now()]
+
+        if po_number:
+            updates.append("po_number = ?")
+            params.append(po_number)
+        
+        if error:
+            updates.append("error_message = ?")
+            params.append(error)
+            
+        params.append(file_path) # For WHERE clause
+
+        sql = f"UPDATE files SET {', '.join(updates)} WHERE file_path = ?"
+        cursor.execute(sql, params)
+        conn.commit()
+        conn.close()
+
+    def save_line_items(self, items):
+        """Bulk saves extracted line items."""
+        if not items: return
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        for item in items:
+            cursor.execute('''
+                INSERT INTO line_items (po_number, doc_type, line_ref, description, part_no, quantity, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                item.get('po_number'),
+                item.get('doc_type'),
+                item.get('line_ref'),
+                item.get('description'),
+                item.get('part_no'),
+                item.get('quantity', 0.0),
+                json.dumps(item)
+            ))
+        conn.commit()
+        conn.close()
+
+    def fetch_line_items(self, po_number):
+        """Retrieves all items for a specific PO universe."""
+        conn = self.connect()
+        conn.row_factory = sqlite3.Row # Allows accessing cols by name
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM line_items WHERE po_number = ?", (po_number,))
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return rows
 
     def get_mergeable_bundles(self):
-        """Finds all PO numbers that have a complete set of documents."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT po_number, file_path, doc_type FROM files WHERE status = 'SUCCESS' AND po_number IS NOT NULL"
-            )
-            rows = cursor.fetchall()
+        """
+        Finds PO numbers that have files ready to merge.
+        Returns: { "PO-123": [ {path, type}, ... ] }
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
         
+        # Get all files that have a PO number assigned
+        cursor.execute("SELECT po_number, file_path, doc_type FROM files WHERE po_number IS NOT NULL")
+        rows = cursor.fetchall()
+        conn.close()
+
         bundles = {}
-        for po, path, type_ in rows:
-            if po not in bundles:
-                bundles[po] = []
-            bundles[po].append({'path': path, 'type': type_})
-        
+        for po, path, dtype in rows:
+            if po not in bundles: bundles[po] = []
+            bundles[po].append({"path": path, "type": dtype})
+            
         return bundles
-
-    def save_line_items(self, items: list):
-        """
-        Batch inserts extracted line items.
-        """
-        if not items: return
-        
-        query = """
-        INSERT INTO line_items (po_number, doc_type, line_ref, description, part_no, quantity)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """
-        data = [
-            (
-                i['po_number'], 
-                i.get('doc_type', 'UNKNOWN'), 
-                i.get('line_ref'), 
-                i.get('description'), 
-                i.get('part_no'), 
-                i.get('quantity')
-            ) 
-            for i in items
-        ]
-        
-        try:
-            with self._get_connection() as conn:
-                conn.executemany(query, data)
-        except Exception as e:
-            logger.error(f"Failed to save line items: {e}")
-
-    def fetch_line_items(self, po_number: str) -> List[dict]:
-        """
-        Returns all line items associated with a PO Number.
-        Used by the Reconciler to validate bundles.
-        """
-        query = "SELECT * FROM line_items WHERE po_number = ?"
-        try:
-            with self._get_connection() as conn:
-                # Use row_factory to get dict-like objects
-                conn.row_factory = sqlite3.Row
-                cursor = conn.execute(query, (po_number,))
-                rows = cursor.fetchall()
-                # Convert to standard list of dicts
-                return [dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"Failed to fetch items for {po_number}: {e}")
-            return []

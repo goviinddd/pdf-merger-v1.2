@@ -5,6 +5,8 @@ import pypdfium2 as pdfium
 from ..base import BaseTextExtractor
 import os
 import cv2
+from ultralytics import YOLO
+from src.core.config_loader import settings # <--- Import settings
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -21,9 +23,13 @@ class YoloExtractor(BaseTextExtractor):
         self.yolo_model = None
         self.ocr_engine = None
         self._loaded = False
-        
+        hw_settings = settings.get_hardware_settings()
+        device = 'cpu' if hw_settings['force_cpu'] else None # None allows YOLO to auto-detect GPU
+        self.model = YOLO(model_path)
+        self.model.to(device)
         if not os.path.exists(DEBUG_OUTPUT_DIR):
             os.makedirs(DEBUG_OUTPUT_DIR)
+        logger.info(f"🚀 YOLO successfully loaded on device: {self.model.device}")
 
     def _load_models(self):
         if self._loaded: return

@@ -1,7 +1,6 @@
 import time
 import logging
 import os
-from dotenv import load_dotenv 
 from typing import List, Dict
 from pypdf import PdfWriter, PdfReader
 import json
@@ -10,15 +9,27 @@ import json
 from .database import DatabaseManager
 from .file_utils import FileSystemManager
 from ..extractors import get_document_info, _yolo_extractor 
-from src.extractors.api_connector import extract_line_items_from_crop
+from src.extractors.api_connector import extract_line_items_from_crop, extract_po_number
 from src.logic.linker import link_extracted_data
 from src.logic.reconciler import Reconciler
+
+from src.extractors.api_connector import (
+    extract_line_items_from_crop, 
+    extract_po_number, 
+    extract_line_items_full_page,
+    classify_document_type  
+)
 
 # Setup Logging
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-load_dotenv()
+
+TYPE_ALIASES = {
+    "po": "purchase_order",
+    "do": "delivery_note",
+    "si": "sales_invoice"
+}
 
 class PipelineOrchestrator:
     def __init__(self):
@@ -56,45 +67,88 @@ class PipelineOrchestrator:
                 self.db.update_status(file_path, 'FAILED', error="File Not Found on Disk")
                 continue
 
+            # --- NEW: AUTO-CORRECTION LOGIC ---
+            # We check the file type before processing to catch "Traps"
+            detected_type = classify_document_type(file_path)
+            
+            # Note: Your DB stores types as 'po', 'do', 'si' or full names?
+            # The classifier returns: 'purchase_order', 'delivery_note', 'sales_invoice'
+            # The DB/Folder usually gives: 'Purchase_order', 'Delivery_note', etc.
+            # We normalize to lowercase for comparison.
+            
+            folder_type_normalized = doc_type.lower().replace(" ", "_")
+            if folder_type_normalized.lower() in TYPE_ALIASES:
+
+                folder_type_normalized = TYPE_ALIASES[folder_type_normalized.lower()]
+
+            if detected_type != "unknown" and detected_type != folder_type_normalized:
+                logger.warning(f" MISMATCH: {os.path.basename(file_path)}")
+                logger.warning(f"   Folder says: {doc_type}")
+                logger.warning(f"   System says: {detected_type}")
+                
+                
+                # Trust the System -> Update the variable for this run
+                # (We map back to the format your DB/Extractors expect)
+                if detected_type == "purchase_order": doc_type = "Purchase_order"
+                elif detected_type == "delivery_note": doc_type = "Delivery_note"
+                elif detected_type == "sales_invoice": doc_type = "Sales_invoice"
+                
+                logger.info(f"   >>> Auto-Correcting type to: {doc_type}")
+
             try:
                 self.db.update_status(file_path, 'PROCESSING')
                 
-                # 1. Extract PO Number
+                # 1. Extract PO Number (Now using the potentially corrected doc_type)
                 doc_info = get_document_info(file_path, doc_type)
 
+                # --- FALLBACK LOGIC ---
+                if not doc_info.po_number:
+                    logger.info(f"YOLO failed to find PO for {os.path.basename(file_path)}. Attempting Gemini Fallback...")
+                    fallback_po = extract_po_number(file_path)
+                    if fallback_po:
+                        doc_info.po_number = fallback_po
+                        logger.info(f"Gemini Fallback Success: PO -> {fallback_po}")
+
                 if doc_info.po_number:
+                    # Update DB with success
                     self.db.update_status(file_path, 'SUCCESS', po_number=doc_info.po_number)
                     logger.info(f"Solved: {doc_type.upper()} -> PO: {doc_info.po_number}")
                     
-                    # 2. Extract Line Items (YOLO Only)
+                    # 2. Extract Line Items
                     if _yolo_extractor:
-                        # Scan for tables (This now uses the updated 5-page scan)
                         table_crops = _yolo_extractor.extract_all_table_crops(file_path)
-                        
                         all_extracted_items = []
+                        
                         if table_crops:
-                            for i, crop in enumerate(table_crops):
-                                # Send to Cloud API
+                            logger.info(f"   YOLO found {len(table_crops)} tables. Using Crop Strategy.")
+                            for crop in table_crops:
                                 json_str = extract_line_items_from_crop(crop)
                                 try:
                                     raw_data = json.loads(json_str)
-                                    if raw_data:
-                                        all_extracted_items.extend(raw_data)
+                                    if raw_data: all_extracted_items.extend(raw_data)
                                 except Exception as e:
-                                    logger.error(f"   Failed to parse API JSON: {e}")
-                            
-                            if all_extracted_items:
-                                linked_data = link_extracted_data(doc_info.po_number, all_extracted_items)
-                                for item in linked_data:
-                                    item['doc_type'] = doc_type
-                                
-                                self.db.save_line_items(linked_data)
-                                logger.info(f"   + Extracted {len(linked_data)} items from {len(table_crops)} pages.")
-                            else:
-                                logger.warning(f"   YOLO found tables, but Gemini extracted 0 items.")
+                                    logger.error(f"   Crop JSON parse failed: {e}")
                         else:
-                            logger.warning(f"   No table found by YOLO for {file_path}. Skipping line items.")
+                            logger.warning(f"   No table found by YOLO. Switching to Full-Page Gemini Scan...")
+                            json_str = extract_line_items_full_page(file_path)
+                            try:
+                                raw_data = json.loads(json_str)
+                                if raw_data: 
+                                    all_extracted_items.extend(raw_data)
+                                    logger.info(f"   Fallback Success: Extracted {len(raw_data)} items from full page.")
+                            except Exception as e:
+                                logger.error(f"   Fallback JSON parse failed: {e}")
 
+                        # 3. Save Results
+                        if all_extracted_items:
+                            linked_data = link_extracted_data(doc_info.po_number, all_extracted_items)
+                            for item in linked_data:
+                                item['doc_type'] = doc_type # Using corrected type
+                            
+                            self.db.save_line_items(linked_data)
+                            logger.info(f"   + Database updated with {len(linked_data)} items.")
+                        else:
+                            logger.warning(f"   Failed to extract items via both YOLO and Fallback.")
                 else:
                     self.db.update_status(file_path, 'MANUAL_REVIEW', error="No PO Number found")
                     logger.warning(f"Failed: Could not identify PO for {file_path}")
@@ -118,22 +172,27 @@ class PipelineOrchestrator:
             status = recon_report.get('overall_status', 'UNKNOWN')
             line_items = recon_report.get('line_items', [])
             
-            # 1. Skip if incomplete
+            # 1. Skip if documents are missing (The 3-Way Rule)
+            if status == "WAITING_FOR_DOCS":
+                logger.info(f"Skipping {po_number}: {recon_report.get('details')}")
+                continue
+
+            # 2. Skip if incomplete
             if status == "INCOMPLETE":
                 logger.warning(f"Skipping merge for {po_number}: Partial delivery.")
                 continue
             
-            # 2. Skip if PO Extraction Failed
+            # 3. Skip if PO Extraction Failed
             if status == "PO_DATA_MISSING":
                 logger.warning(f"Skipping merge for {po_number}: PO line items were not extracted.")
                 continue
 
-            # 3. CRITICAL FIX: Skip "Ghost Matches" (Empty vs Empty)
+            # 4. CRITICAL FIX: Skip "Ghost Matches" (Empty vs Empty)
             if status == "MATCH" and not line_items:
                 logger.warning(f"Skipping merge for {po_number}: No items extracted from ANY document (Ghost Match).")
                 continue
 
-            # 4. Warn but allow merge if it's just weird extra items
+            # 5. Warn but allow merge if it's just weird extra items
             if status == "ATTENTION":
                 logger.warning(f"Merging {po_number} with warnings (Unsolicited items).")
 
@@ -158,3 +217,4 @@ class PipelineOrchestrator:
 
             except Exception as e:
                 logger.error(f"Failed to merge bundle for PO {po_number}: {e}")
+    
