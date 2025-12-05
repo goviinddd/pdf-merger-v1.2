@@ -23,7 +23,7 @@ class FileSystemManager:
             'si': self.root / "Sales_invoice",
             'output': self.root / "Merged_PDFs",
             'archive': self.root / "Archive", 
-            'quarantine': self.root / "Quarantine"
+            'quarantine': self.root / "quarantine"
         }
         self._ensure_directories()
 

@@ -3,13 +3,18 @@ pillow
 opencv-python-headless
 pdf2image
 pypdfium2
+pypdf
 
 # --- AI & Vision ---
 ultralytics
 rapidocr-onnxruntime
 google-generativeai
 
-# --- Data & Reporting (NEW) ---
+# --- GUI & Configuration (NEW) ---
+ttkbootstrap
+PyYAML
+
+# --- Data & Reporting ---
 pandas
 openpyxl
 
@@ -17,6 +22,5 @@ openpyxl
 python-dotenv
 reportlab
 
-# --- Legacy / Optional (Safe to keep) ---
-pypdf
+# --- Legacy / Optional ---
 pdfplumber

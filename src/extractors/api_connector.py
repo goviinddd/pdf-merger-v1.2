@@ -4,6 +4,7 @@ import time
 import random
 import re
 import os
+import hashlib
 import google.generativeai as genai
 import pypdfium2 as pdfium 
 from pypdf import PdfReader
@@ -11,263 +12,188 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from PIL import Image
 from src.core.pattern_loader import pattern_config  
 from src.core.config_loader import settings
+from src.core.prompt_loader import PromptLoader 
 
 logger = logging.getLogger(__name__)
+
+# --- CONFIGURATION ---
+CACHE_DIR = "gemini_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+LAST_CALL_TIME = 0
+MIN_REQUEST_INTERVAL = 4.0 
+
 # --- LOAD SETTINGS ---
 try:
     API_KEY = settings.get_api_key()
     LLM_CONFIG = settings.get_llm_settings()
-    
-    # Configure Gemini immediately
     genai.configure(api_key=API_KEY)
-    
     ACTIVE_MODELS = [LLM_CONFIG['model_name']]
-    
 except Exception as e:
     logger.error(f"CRITICAL: Failed to load config settings: {e}")
     API_KEY = None
     ACTIVE_MODELS = []
 
-# --- HELPER: ROBUST RETRY LOGIC ---
+# --- CACHING & HELPERS ---
+def _get_file_hash(file_path):
+    hasher = hashlib.md5()
+    with open(file_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+def _get_cache_path(file_hash, operation_tag, page_index=None):
+    suffix = f"_p{page_index}" if page_index is not None else ""
+    return os.path.join(CACHE_DIR, f"{file_hash}_{operation_tag}{suffix}.json")
+
+def _load_from_cache(cache_path):
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                logger.info(f"   ⚡ Cache Hit: {os.path.basename(cache_path)}")
+                return data
+        except: pass
+    return None
+
+def _save_to_cache(cache_path, data):
+    try:
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except: pass
+
+def _enforce_rate_limit():
+    global LAST_CALL_TIME
+    elapsed = time.time() - LAST_CALL_TIME
+    if elapsed < MIN_REQUEST_INTERVAL:
+        time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+    LAST_CALL_TIME = time.time()
+
 def _generate_with_retry(model, content, config=None, safety_settings=None, max_retries=3):
-    """
-    Tries to generate content, handling Rate Limits (429) automatically.
-    """
+    _enforce_rate_limit()
     for attempt in range(max_retries):
         try:
-            return model.generate_content(
-                content,
-                generation_config=config,
-                safety_settings=safety_settings
-            )
+            return model.generate_content(content, generation_config=config, safety_settings=safety_settings)
         except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "Resource exhausted" in error_str:
-                wait_time = (2 ** attempt) + random.uniform(0, 1)
-                logger.warning(f"Rate limit hit (429). Retrying in {wait_time:.2f}s...")
-                time.sleep(wait_time)
+            if "429" in str(e) or "Resource exhausted" in str(e):
+                time.sleep((2 ** attempt) + random.uniform(0, 1))
             else:
-                logger.error(f"Gemini API Error: {e}")
-                return None # Stop retrying on non-transient errors
-    logger.error("Max retries exceeded for Gemini API.")
+                return None
     return None
+
+# =========================================================
+#                   EXTRACTORS
+# =========================================================
 
 def extract_po_number(file_path: str):
-    """
-    Fallback: Sends the document to Gemini to find the PO Number.
-    """
     if not API_KEY: return None
-
-    prompt = """
-    Extract the Purchase Order (PO) Number.
-    Look for labels like "PO Number", "Order #", "P.O.", "Procurement Ref".
-    Return ONLY JSON: {"po_number": "value"}
-    If NOT found, return {"po_number": null}
-    """
+    file_hash = _get_file_hash(file_path)
+    cache_path = _get_cache_path(file_hash, "po_num")
     
-    # Use config settings for generation
-    gen_config = {
-        "response_mime_type": "application/json",
-        "temperature": 0.0 # Force precision for extraction
-    }
+    cached = _load_from_cache(cache_path)
+    if cached: return cached
 
-    def _query(image, model_name):
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = _generate_with_retry(
-                model, 
-                [prompt, image],
-                config=gen_config
-            )
-            if response and response.text:
-                data = json.loads(response.text)
-                return data.get("po_number")
-        except Exception:
-            pass
-        return None
+    prompt = PromptLoader.get("extract_po_number")
+    gen_config = {"response_mime_type": "application/json", "temperature": 0.0}
 
+    result_val = None
     try:
         pdf = pdfium.PdfDocument(file_path)
-        if len(pdf) == 0: return None
+        if len(pdf) > 0:
+            for i in range(min(2, len(pdf))):
+                img = pdf[i].render(scale=3).to_pil().convert("RGB")
+                for model_name in ACTIVE_MODELS:
+                    model = genai.GenerativeModel(model_name)
+                    resp = _generate_with_retry(model, [prompt, img], config=gen_config)
+                    if resp and resp.text:
+                        data = json.loads(resp.text)
+                        if data.get("po_number"):
+                            result_val = data.get("po_number")
+                            break
+                if result_val: break
+    except: pass
 
-        for model_name in ACTIVE_MODELS:
-            # Check Page 1
-            page_1_img = pdf[0].render(scale=3).to_pil().convert("RGB")
-            po = _query(page_1_img, model_name)
-            if po: return po
-            
-            # Check Page 2 if needed
-            if len(pdf) > 1:
-                page_2_img = pdf[1].render(scale=3).to_pil().convert("RGB")
-                po = _query(page_2_img, model_name)
-                if po: return po
-            
-    except Exception as e:
-        logger.error(f"Gemini Fallback Error: {e}")
-
-    return None
+    _save_to_cache(cache_path, result_val)
+    return result_val
 
 def extract_line_items_from_crop(image: Image.Image):
-    """
-    Sends a TABLE CROP to Gemini.
-    """
-    prompt = """
-    Extract table rows.
+    # UPDATED PROMPT: Text Priority
+    prompt = PromptLoader.get("extract_line_items_crop")
     
-    CRITICAL RULE FOR 'line_ref':
-    1. Look inside the 'Description' or text columns for phrases like "Line Item - X", "PO Line X", or "Item No: X".
-    2. If found, use THAT number 'X' as the "line_ref".
-    3. ONLY use the 'SL', 'No', or Row Number column if NO specific PO Line reference exists in the text.
-    
-    Output JSON list: [{"line_ref": "2", "description": "Item Name", "part_no": "123", "quantity": "4"}]
-    Return [] if unreadable.
-    """
-    
-    safety_settings = {
-        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-    }
-
-    # Pull user config
-    gen_config = {
-        "response_mime_type": "application/json",
-        "temperature": LLM_CONFIG['temperature'],
-        "max_output_tokens": LLM_CONFIG['max_tokens']
-    }
+    safety_settings = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE}
+    gen_config = {"response_mime_type": "application/json", "temperature": LLM_CONFIG['temperature']}
 
     for model_name in ACTIVE_MODELS:
         try:
             model = genai.GenerativeModel(model_name)
-            response = _generate_with_retry(
-                model,
-                [prompt, image],
-                safety_settings=safety_settings,
-                config=gen_config
-            )
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            logger.error(f"Error with {model_name}: {e}")
-            continue
-
+            resp = _generate_with_retry(model, [prompt, image], safety_settings=safety_settings, config=gen_config)
+            if resp and resp.text: return resp.text
+        except: continue
     return "[]"
 
-def extract_line_items_full_page(file_path: str):
-    """
-    Fallback: Full page scan.
-    """
+def extract_line_items_full_page(file_path: str, page_index=0):
     if not API_KEY: return "[]"
-
-    prompt = """
-    Analyze this document. Identify the main table.
     
-    CRITICAL RULE FOR 'line_ref':
-    1. Look inside the 'Description' or text columns for phrases like "Line Item - X", "PO Line X", or "Item No: X".
-    2. If found, use THAT number 'X' as the "line_ref".
-    3. ONLY use the 'SL', 'No', or Row Number column if NO specific PO Line reference exists in the text.
-    
-    Output JSON list: [{"line_ref": "2", "description": "Item Name", "part_no": "123", "quantity": "4"}]
-    Return [] if no table data is found.
-    """
-    
-    gen_config = {
-        "response_mime_type": "application/json",
-        "temperature": LLM_CONFIG['temperature'],
-        "max_output_tokens": LLM_CONFIG['max_tokens']
-    }
+    file_hash = _get_file_hash(file_path)
+    cache_path = _get_cache_path(file_hash, "full_table", page_index)
+    cached = _load_from_cache(cache_path)
+    if cached: return cached
 
-    def _query(image, model_name):
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = _generate_with_retry(
-                model,
-                [prompt, image],
-                config=gen_config
-            )
-            if response and response.text:
-                # Cleanup markdown just in case model ignores mime_type
-                return response.text.replace("```json", "").replace("```", "").strip()
-        except Exception as e:
-            logger.warning(f"Full-page scan with {model_name} failed: {e}")
-            return None
-
+    prompt = PromptLoader.get("extract_line_items_full_page")
+    
+    gen_config = {"response_mime_type": "application/json", "temperature": LLM_CONFIG['temperature']}
+    
+    result_json = "[]"
     try:
         pdf = pdfium.PdfDocument(file_path)
-        if len(pdf) == 0: return "[]"
-        
-        image = pdf[0].render(scale=3).to_pil().convert("RGB")
-        
-        for model_name in ACTIVE_MODELS:
-            result = _query(image, model_name)
-            if result and result != "[]":
-                return result
-                
-    except Exception as e:
-        logger.error(f"Gemini Full-Page Fallback Error: {e}")
+        if page_index < len(pdf):
+            image = pdf[page_index].render(scale=3).to_pil().convert("RGB")
+            for model_name in ACTIVE_MODELS:
+                model = genai.GenerativeModel(model_name)
+                resp = _generate_with_retry(model, [prompt, image], config=gen_config)
+                if resp and resp.text:
+                    result_json = resp.text.replace("```json", "").replace("```", "").strip()
+                    break
+    except: pass
 
-    return "[]"
+    _save_to_cache(cache_path, result_json)
+    return result_json
 
 def classify_document_type(file_path: str) -> str:
-    """
-    Hybrid Classifier:
-    1. Tries to read text keywords (Free/Fast).
-    2. If that fails (scanned PDF), asks Gemini (Cost/Smart).
-    """
-    
-    #  REGEX 
     try:
         reader = PdfReader(file_path)
         if len(reader.pages) > 0:
             text = reader.pages[0].extract_text().lower()
-            preview = text[:100].replace('\n', ' ') # Show first 100 chars flat
-            logger.info(f"🔎 TEXT CHECK for {os.path.basename(file_path)}: '{preview}'")
-            if not text.strip():
-                logger.warning("   (Text is empty! File is likely a scanned image.)")
-            type_patterns = pattern_config.get_type_patterns()
-            
-            # Loop through the YAML structure
-            for doc_type, regex_list in type_patterns.items():
-                for pattern in regex_list:
-                    if re.search(pattern, text):
-                        return doc_type
-    except Exception as e:
-        logger.warning(f"Regex classification failed (file might be image-only): {e}")
+            if text.strip():
+                type_patterns = pattern_config.get_type_patterns()
+                for doc_type, regex_list in type_patterns.items():
+                    for pattern in regex_list:
+                        if re.search(pattern, text): return doc_type
+    except: pass
 
-    # GEMINI VISION 
     if not API_KEY: return "unknown"
-
-    logger.info(f"Regex failed. Asking Gemini to classify {os.path.basename(file_path)}...")
-
-    prompt = """
-    Classify this document image into one of these exact categories:
-    1. "purchase_order"
-    2. "delivery_note"
-    3. "sales_invoice"
     
-    Return ONLY the category string. If unsure, return "unknown".
-    """
+    file_hash = _get_file_hash(file_path)
+    cache_path = _get_cache_path(file_hash, "classification")
+    cached = _load_from_cache(cache_path)
+    if cached: return cached
+
+    prompt = PromptLoader.get("classify_document")
     
+    result_type = "unknown"
     try:
         pdf = pdfium.PdfDocument(file_path)
-        if len(pdf) == 0: return "unknown"
-        
-        image = pdf[0].render(scale=1).to_pil().convert("RGB") 
-        
+        image = pdf[0].render(scale=1).to_pil().convert("RGB")
         for model_name in ACTIVE_MODELS:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = _generate_with_retry(model, [prompt, image])
-                if response and response.text:
-                    result = response.text.strip().lower().replace('"', '').replace("'", "")
-                    for valid in ["purchase_order", "delivery_note", "sales_invoice"]:
-                        if valid in result:
-                            return valid
-            except:
-                continue
-                
-    except Exception as e:
-        logger.error(f"Gemini Classification Error: {e}")
+            model = genai.GenerativeModel(model_name)
+            resp = _generate_with_retry(model, [prompt, image])
+            if resp and resp.text:
+                clean = resp.text.lower().strip().replace('"','').replace("'", "")
+                if "purchase" in clean: result_type = "purchase_order"
+                elif "delivery" in clean: result_type = "delivery_note"
+                elif "invoice" in clean: result_type = "sales_invoice"
+                break
+    except: pass
 
-    return "unknown"
+    _save_to_cache(cache_path, result_type)
+    return result_type

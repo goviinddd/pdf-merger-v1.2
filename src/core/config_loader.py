@@ -7,7 +7,7 @@ class Config:
         
         # Check if config exists
         if not os.path.exists(filename):
-            print(f"⚠️  Config file '{filename}' not found. Using defaults.")
+            print(f"Config file '{filename}' not found. Using defaults.")
             # We don't raise an error here to allow defaults to take over if needed,
             # but usually, you want to warn the user.
         

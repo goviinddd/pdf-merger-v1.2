@@ -1,33 +1,48 @@
-# Python System Files
+# --- Python System Files ---
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual Environment (Heavy!)
+# --- Virtual Environment ---
 venv/
 .venv/
 env/
 
-# Database (Client starts fresh)
+# --- Database & Cache (IMPORTANT) ---
 *.db
 *.sqlite3
+gemini_cache/
 
-# The Data Folders (Client creates these locally)
+# --- Local Data Folders ---
+# Input folders (Don't push your actual receipts!)
 Purchase_order/
 Delivery_note/
 Sales_invoice/
+receipts/
+
+# Output/Processing folders
 Merged_PDFs/
 Archive/
+quarantine/
 Quarantine/
+processed/
+reports/
 Test_Zone/
+
+# --- Training Data ---
 yolo_training/
 debug_yolo_crops/
-reports/
 
-# Logs and Secrets
+# --- Logs, Secrets & Binaries ---
 *.log
 .env
 .DS_Store
 *.pdf
 *.png
-*.log	
+*.jpg
+*.xlsx
+
+# --- Optional: Large Models ---
+# If your .pt file is >100MB, GitHub will reject it. 
+# Uncomment below if you can't push the model.
+# *.pt

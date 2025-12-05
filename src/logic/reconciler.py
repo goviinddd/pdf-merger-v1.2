@@ -1,95 +1,125 @@
 import logging
+import re
 from collections import defaultdict
 from typing import List, Dict, Any
+from difflib import SequenceMatcher
 
 logger = logging.getLogger(__name__)
 
 class Reconciler:
     def __init__(self, db_manager):
-        """
-        Initialize with Database ONLY.
-        Do NOT pass po_number here.
-        """
         self.db = db_manager
 
+    def _normalize_key(self, raw_ref: str) -> str:
+        """
+        Standardizes line numbers.
+        '3-1' -> '3'
+        'Line Item 3' -> '3'
+        """
+        if not raw_ref: return "UNKNOWN"
+        s = str(raw_ref).strip().upper()
+        
+        # Handle 3-1 or 3.0
+        if '-' in s:
+            parts = s.split('-')
+            if parts[0].strip().isdigit(): return parts[0].strip()
+        if '.' in s:
+             parts = s.split('.')
+             if parts[0].strip().isdigit(): return parts[0].strip()
+
+        # Regex for "Item 3"
+        match = re.search(r'(\d+)', s)
+        if match: return match.group(1)
+        return s
+
+    def _strings_are_similar(self, str1, str2, threshold=0.35):
+        """
+        Returns True if strings are roughly similar.
+        Threshold 0.35 means they need to share ~35% of characters/structure.
+        """
+        if not str1 or not str2: 
+            return True # If data is missing, we trust the Line Number
+        
+        s1 = str(str1).lower().strip()
+        s2 = str(str2).lower().strip()
+        
+        # 1. Exact Match (Fast)
+        if s1 == s2: return True
+        
+        # 2. Containment (e.g. "Drill" inside "Drill Bit")
+        if s1 in s2 or s2 in s1: return True
+        
+        # 3. Fuzzy Ratio
+        ratio = SequenceMatcher(None, s1, s2).ratio()
+        return ratio > threshold
+
     def reconcile_po(self, po_number: str) -> Dict[str, Any]:
-        """
-        Performs 3-Way Matching for a specific PO Universe.
-        Checks for: Purchase Order, Delivery Note, AND Sales Invoice.
-        """
-        # 1. Fetch all items for this PO
         all_items = self.db.fetch_line_items(po_number)
         
         if not all_items:
-            return {
-                "po_number": po_number,
-                "overall_status": "EMPTY",
-                "line_items": [],
-                "details": "No line items found."
-            }
+            return {"overall_status": "PO_DATA_MISSING", "line_items": []}
 
-        # 2. Bucketize by Document Type
         po_ledger = {} 
         dn_ledger = defaultdict(float) 
         si_ledger = defaultdict(float) 
-
-        # We track which documents we have actually seen
         seen_docs = set()
+        
+        # Store PO Descriptions to compare against DO/SI later
+        po_descriptions = {}
 
         for item in all_items:
             doc_type = item.get('doc_type', '').lower()
-            seen_docs.add(doc_type)
+            if 'purchase' in doc_type or 'po' in doc_type: tag = 'po'
+            elif 'delivery' in doc_type or 'do' in doc_type or 'dn' in doc_type: tag = 'dn'
+            elif 'invoice' in doc_type or 'si' in doc_type: tag = 'si'
+            else: tag = 'unknown'
 
-            line_ref = str(item.get('line_ref'))
+            seen_docs.add(tag)
             
-            # Safe float conversion
-            try:
-                qty = float(item.get('quantity', 0.0))
-            except (ValueError, TypeError):
-                qty = 0.0
+            # Normalize Line Number
+            raw_ref = str(item.get('line_ref', ''))
+            norm_ref = self._normalize_key(raw_ref)
             
-            # Normalize Line Ref (remove decimals like '1.0' -> '1')
-            if line_ref.endswith('.0'):
-                line_ref = line_ref[:-2]
+            try: qty = float(item.get('quantity', 0.0))
+            except: qty = 0.0
 
-            if doc_type == 'po':
-                po_ledger[line_ref] = {
-                    "qty": qty,
-                    "desc": item.get('description', 'Unknown Item'),
-                    "part_no": item.get('part_no', '')
-                }
-            elif doc_type in ['do', 'dn', 'delivery_note']:
-                dn_ledger[line_ref] += qty
-            elif doc_type in ['si', 'invoice', 'sales_invoice']:
-                si_ledger[line_ref] += qty
+            if tag == 'po':
+                po_ledger[norm_ref] = {"qty": qty, "desc": item.get('description', '')}
+                po_descriptions[norm_ref] = item.get('description', '')
+                
+            elif tag == 'dn':
+                dn_ledger[norm_ref] += qty
+                
+                # --- CONTENT VALIDATION ---
+                # Even if Line Numbers match, check if Descriptions are totally different
+                if norm_ref in po_descriptions:
+                    po_desc = po_descriptions[norm_ref]
+                    dn_desc = item.get('description', '')
+                    
+                    if not self._strings_are_similar(po_desc, dn_desc):
+                        return {
+                            "po_number": po_number, 
+                            "overall_status": "MISMATCH",
+                            "details": f"Content Mismatch on Line {norm_ref}: PO='{po_desc[:15]}...', DO='{dn_desc[:15]}...'"
+                        }
+                        
+            elif tag == 'si':
+                si_ledger[norm_ref] += qty
 
-        # --- 3-WAY GATEKEEPER ---
-        # Check if we have all three necessary pillars.
-        # Adjust these keys to match exactly what your 'pipeline.py' saves as 'doc_type'
-        # based on your folder names: "Purchase_order", "Delivery_note", "Sales_invoice"
-        
-        has_po = any(x in seen_docs for x in ['po', 'purchase_order'])
-        has_dn = any(x in seen_docs for x in ['do', 'dn', 'delivery_note'])
-        has_si = any(x in seen_docs for x in ['si', 'invoice', 'sales_invoice'])
+        # Check Missing Docs
+        missing = []
+        if 'po' not in seen_docs: missing.append("PO")
+        if 'dn' not in seen_docs: missing.append("DO")
+        if 'si' not in seen_docs: missing.append("SI")
+        if missing:
+            return {"overall_status": "WAITING_FOR_DOCS", "details": f"Missing: {','.join(missing)}"}
 
-        missing_docs = []
-        if not has_po: missing_docs.append("Purchase Order")
-        if not has_dn: missing_docs.append("Delivery Note")
-        if not has_si: missing_docs.append("Sales Invoice")
-
-        if missing_docs:
-            return {
-                "po_number": po_number,
-                "overall_status": "WAITING_FOR_DOCS",
-                "line_items": [],
-                "details": f"Cannot merge yet. Missing: {', '.join(missing_docs)}"
-            }
-
-        # 3. The Comparison Logic (Only runs if all 3 exist)
+        # Compare Quantities
         report = []
-        universe_status = "MATCH" 
+        universe_status = "MATCH"
+        
+        matched_lines_count = 0
 
-        # Compare against the PO (The Source of Truth)
         for line_ref, po_data in po_ledger.items():
             ordered = po_data['qty']
             received = dn_ledger.get(line_ref, 0.0)
@@ -97,46 +127,32 @@ class Reconciler:
             
             line_status = "OK"
             
-            # Check Delivery vs Order
             if received < ordered:
                 line_status = "PARTIAL_DELIVERY"
-                universe_status = "INCOMPLETE"
+                universe_status = "INCOMPLETE" # Stops Merge
             elif received > ordered:
                 line_status = "OVER_DELIVERY"
                 universe_status = "ATTENTION"
             
-            # Check Invoice vs Received (You shouldn't pay for what you didn't get)
-            if invoiced < received:
-                line_status = "PARTIAL_INVOICE"
-                universe_status = "INCOMPLETE"
-            elif invoiced > received:
-                line_status = "OVER_INVOICED"
-                universe_status = "ATTENTION"
-
+            if received > 0:
+                matched_lines_count += 1
+            
             report.append({
-                "Line": line_ref,
-                "Description": po_data['desc'],
-                "Ordered": ordered,
-                "Received": received,
-                "Invoiced": invoiced,
-                "Status": line_status
+                "Line": line_ref, "Status": line_status,
+                "Ordered": ordered, "Received": received, "Desc": po_data['desc']
             })
 
-        # Check for Unsolicited items (Items delivered but not on PO)
-        for line_ref, qty in dn_ledger.items():
-            if line_ref not in po_ledger:
-                report.append({
-                    "Line": line_ref,
-                    "Description": "UNKNOWN ITEM (Not in PO)",
-                    "Ordered": 0,
-                    "Received": qty,
-                    "Invoiced": si_ledger.get(line_ref, 0.0),
-                    "Status": "UNSOLICITED"
-                })
-                universe_status = "ATTENTION"
+        # Final Safety Check: Did we actually match anything?
+        if len(po_ledger) > 0 and matched_lines_count == 0:
+             return {
+                "po_number": po_number, 
+                "overall_status": "MISMATCH",
+                "details": "Documents exist but ZERO line items matched. Check parsing logic."
+            }
 
-        return {
-            "po_number": po_number,
-            "overall_status": universe_status,
-            "line_items": report
-        }
+        # Check for Unsolicited Items (Ghost Items)
+        for line_ref in dn_ledger:
+            if line_ref not in po_ledger:
+                return {"overall_status": "MISMATCH", "details": f"Delivery contains item line {line_ref} not found in PO."}
+
+        return {"overall_status": universe_status, "line_items": report}

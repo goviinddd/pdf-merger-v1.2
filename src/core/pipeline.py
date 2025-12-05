@@ -1,15 +1,16 @@
 import time
 import logging
 import os
+import shutil
+import datetime
+import json
 from typing import List, Dict
 from pypdf import PdfWriter, PdfReader
-import json
 
 # Import our modules
 from .database import DatabaseManager
 from .file_utils import FileSystemManager
 from ..extractors import get_document_info, _yolo_extractor 
-from src.extractors.api_connector import extract_line_items_from_crop, extract_po_number
 from src.logic.linker import link_extracted_data
 from src.logic.reconciler import Reconciler
 
@@ -17,14 +18,13 @@ from src.extractors.api_connector import (
     extract_line_items_from_crop, 
     extract_po_number, 
     extract_line_items_full_page,
-    classify_document_type  
+    classify_document_type      
 )
 
 # Setup Logging
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-
 TYPE_ALIASES = {
     "po": "purchase_order",
     "do": "delivery_note",
@@ -44,6 +44,66 @@ class PipelineOrchestrator:
         self._step_process_files()
         self._step_merge_documents()
         logger.info(">>> Pipeline Pass Completed")
+
+    # --- QUARANTINE SINGLE FILE (Corruption/No PO) ---
+    def _quarantine_file(self, file_path, error_msg):
+        """Moves a single problematic file to quarantine."""
+        quarantine_base = "quarantine"
+        os.makedirs(quarantine_base, exist_ok=True)
+
+        filename = os.path.basename(file_path)
+        destination_pdf = os.path.join(quarantine_base, filename)
+
+        if os.path.exists(destination_pdf):
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            name, ext = os.path.splitext(filename)
+            destination_pdf = os.path.join(quarantine_base, f"{name}_{timestamp}{ext}")
+
+        try:
+            shutil.move(file_path, destination_pdf)
+            logger.warning(f"MOVED TO QUARANTINE: {filename}")
+            
+            log_path = os.path.splitext(destination_pdf)[0] + ".txt"
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write(f"File: {filename}\nError: {error_msg}\n")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to quarantine {filename}: {e}")
+            return False
+
+    # --- NEW: QUARANTINE BUNDLE (Logic Mismatch) ---
+    def _quarantine_bundle(self, po_number, files, reason):
+        """
+        Moves ALL files associated with a PO (PO, DO, Invoice) to a dedicated folder.
+        Used when documents exist but content contradicts (e.g. 3-1 vs Line Item 3).
+        """
+        # Create a folder specifically for this mismatch
+        folder_name = f"MISMATCH_{po_number}_{datetime.datetime.now().strftime('%H%M%S')}"
+        quarantine_path = os.path.join("quarantine", folder_name)
+        os.makedirs(quarantine_path, exist_ok=True)
+        
+        logger.warning(f"Quarantining Bundle {po_number} -> {folder_name}")
+
+        # 1. Create Explaination File
+        with open(os.path.join(quarantine_path, "DISCREPANCY_REPORT.txt"), "w") as f:
+            f.write(f"PO Number: {po_number}\n")
+            f.write(f"Reason: {reason}\n")
+            f.write("-" * 30 + "\n")
+            f.write("Files moved:\n")
+            for file_data in files:
+                f.write(f"- {os.path.basename(file_data['path'])}\n")
+
+        # 2. Move all files in the bundle
+        for file_data in files:
+            src = file_data['path']
+            if os.path.exists(src):
+                dst = os.path.join(quarantine_path, os.path.basename(src))
+                try:
+                    shutil.move(src, dst)
+                    # Update DB to stop processing this file
+                    self.db.update_status(src, 'QUARANTINED', error=f"Bundle Mismatch: {reason}")
+                except Exception as e:
+                    logger.error(f"Failed to move {src} to bundle quarantine: {e}")
 
     def _step_scan_inputs(self):
         logger.info("Scanning input directories...")
@@ -67,135 +127,138 @@ class PipelineOrchestrator:
                 self.db.update_status(file_path, 'FAILED', error="File Not Found on Disk")
                 continue
 
-            # --- NEW: AUTO-CORRECTION LOGIC ---
-            # We check the file type before processing to catch "Traps"
+            # --- AUTO-CORRECTION LOGIC ---
             detected_type = classify_document_type(file_path)
-            
-            # Note: Your DB stores types as 'po', 'do', 'si' or full names?
-            # The classifier returns: 'purchase_order', 'delivery_note', 'sales_invoice'
-            # The DB/Folder usually gives: 'Purchase_order', 'Delivery_note', etc.
-            # We normalize to lowercase for comparison.
-            
             folder_type_normalized = doc_type.lower().replace(" ", "_")
-            if folder_type_normalized.lower() in TYPE_ALIASES:
-
-                folder_type_normalized = TYPE_ALIASES[folder_type_normalized.lower()]
+            if folder_type_normalized in TYPE_ALIASES:
+                folder_type_normalized = TYPE_ALIASES[folder_type_normalized]
 
             if detected_type != "unknown" and detected_type != folder_type_normalized:
-                logger.warning(f" MISMATCH: {os.path.basename(file_path)}")
-                logger.warning(f"   Folder says: {doc_type}")
-                logger.warning(f"   System says: {detected_type}")
-                
-                
-                # Trust the System -> Update the variable for this run
-                # (We map back to the format your DB/Extractors expect)
                 if detected_type == "purchase_order": doc_type = "Purchase_order"
                 elif detected_type == "delivery_note": doc_type = "Delivery_note"
                 elif detected_type == "sales_invoice": doc_type = "Sales_invoice"
-                
                 logger.info(f"   >>> Auto-Correcting type to: {doc_type}")
 
+            # --- START SAFE PROCESSING ---
             try:
                 self.db.update_status(file_path, 'PROCESSING')
                 
-                # 1. Extract PO Number (Now using the potentially corrected doc_type)
+                # 1. Extract Header Info (PO Number) - Usually fine on Page 1
                 doc_info = get_document_info(file_path, doc_type)
 
-                # --- FALLBACK LOGIC ---
+                # Fallback for PO Number
                 if not doc_info.po_number:
-                    logger.info(f"YOLO failed to find PO for {os.path.basename(file_path)}. Attempting Gemini Fallback...")
                     fallback_po = extract_po_number(file_path)
                     if fallback_po:
                         doc_info.po_number = fallback_po
-                        logger.info(f"Gemini Fallback Success: PO -> {fallback_po}")
 
                 if doc_info.po_number:
-                    # Update DB with success
                     self.db.update_status(file_path, 'SUCCESS', po_number=doc_info.po_number)
                     logger.info(f"Solved: {doc_type.upper()} -> PO: {doc_info.po_number}")
                     
-                    # 2. Extract Line Items
-                    if _yolo_extractor:
-                        table_crops = _yolo_extractor.extract_all_table_crops(file_path)
-                        all_extracted_items = []
+                    # 2. MULTI-PAGE LINE ITEM EXTRACTION
+                    # We need to scan ALL pages, not just the first one.
+                    
+                    all_extracted_items = []
+                    
+                    try:
+                        reader = PdfReader(file_path)
+                        total_pages = len(reader.pages)
+                        logger.info(f"   Scanning {total_pages} page(s) for line items...")
+                    except:
+                        total_pages = 1 # Fallback if pypdf fails to read
+                    
+                    # Loop through every page
+                    for page_idx in range(total_pages):
+                        page_num = page_idx + 1
+                        logger.debug(f"     -> Processing Page {page_num}/{total_pages}...")
                         
-                        if table_crops:
-                            logger.info(f"   YOLO found {len(table_crops)} tables. Using Crop Strategy.")
-                            for crop in table_crops:
-                                json_str = extract_line_items_from_crop(crop)
+                        items_on_this_page = []
+
+                        # A. Try YOLO Table Extraction for this page
+                        if _yolo_extractor:
+                            # Note: Ensure your extractor accepts 'page_index' or 'page_number'
+                            # If not, you might need to update the extractor to use pdf2image with first_page=page_num, last_page=page_num
+                            table_crops = _yolo_extractor.extract_all_table_crops(file_path, page_index=page_idx)
+                            
+                            if table_crops:
+                                logger.info(f"     [Page {page_num}] YOLO found {len(table_crops)} tables.")
+                                for crop in table_crops:
+                                    json_str = extract_line_items_from_crop(crop)
+                                    try:
+                                        raw_data = json.loads(json_str)
+                                        if raw_data: items_on_this_page.extend(raw_data)
+                                    except: pass
+                            else:
+                                # B. Fallback: Full Page Scan for this page
+                                # Only run fallback if YOLO found nothing on this page
+                                logger.debug(f"     [Page {page_num}] No tables via YOLO. Trying Gemini Full-Scan...")
+                                json_str = extract_line_items_full_page(file_path, page_index=page_idx)
                                 try:
                                     raw_data = json.loads(json_str)
-                                    if raw_data: all_extracted_items.extend(raw_data)
-                                except Exception as e:
-                                    logger.error(f"   Crop JSON parse failed: {e}")
-                        else:
-                            logger.warning(f"   No table found by YOLO. Switching to Full-Page Gemini Scan...")
-                            json_str = extract_line_items_full_page(file_path)
-                            try:
-                                raw_data = json.loads(json_str)
-                                if raw_data: 
-                                    all_extracted_items.extend(raw_data)
-                                    logger.info(f"   Fallback Success: Extracted {len(raw_data)} items from full page.")
-                            except Exception as e:
-                                logger.error(f"   Fallback JSON parse failed: {e}")
+                                    if raw_data: 
+                                        items_on_this_page.extend(raw_data)
+                                        logger.info(f"     [Page {page_num}] Gemini found {len(raw_data)} items.")
+                                except: pass
+                        
+                        # Add items found on this page to the master list
+                        if items_on_this_page:
+                            all_extracted_items.extend(items_on_this_page)
 
-                        # 3. Save Results
-                        if all_extracted_items:
-                            linked_data = link_extracted_data(doc_info.po_number, all_extracted_items)
-                            for item in linked_data:
-                                item['doc_type'] = doc_type # Using corrected type
-                            
-                            self.db.save_line_items(linked_data)
-                            logger.info(f"   + Database updated with {len(linked_data)} items.")
-                        else:
-                            logger.warning(f"   Failed to extract items via both YOLO and Fallback.")
+                    # 3. Save Consolidated Results
+                    if all_extracted_items:
+                        logger.info(f"   Total Items Extracted (All Pages): {len(all_extracted_items)}")
+                        linked_data = link_extracted_data(doc_info.po_number, all_extracted_items)
+                        for item in linked_data:
+                            item['doc_type'] = doc_type 
+                        
+                        self.db.save_line_items(linked_data)
+                        logger.info(f"   + Database updated.")
+                    else:
+                        logger.warning(f"   Failed to extract items from any page.")
                 else:
-                    self.db.update_status(file_path, 'MANUAL_REVIEW', error="No PO Number found")
-                    logger.warning(f"Failed: Could not identify PO for {file_path}")
+                    error_msg = "No PO Number found after all fallback attempts."
+                    self._quarantine_file(file_path, error_msg)
+                    self.db.update_status(file_path, 'QUARANTINED', error=error_msg)
 
             except Exception as e:
                 logger.error(f"CRITICAL ERROR processing {file_path}: {e}")
-                self.db.update_status(file_path, 'FAILED', error=str(e))
+                self._quarantine_file(file_path, str(e))
+                self.db.update_status(file_path, 'QUARANTINED', error=str(e))
 
     def _step_merge_documents(self):
         bundles = self.db.get_mergeable_bundles()
         reconciler = Reconciler(self.db)
         
         for po_number, files in bundles.items():
-            sorted_files = sorted(
-                files, 
-                key=lambda x: self.type_priority.get(x['type'], 99)
-            )
+            sorted_files = sorted(files, key=lambda x: self.type_priority.get(x['type'], 99))
 
-            # --- RECONCILIATION CHECK ---
+            # --- RECONCILIATION ---
             recon_report = reconciler.reconcile_po(po_number)
             status = recon_report.get('overall_status', 'UNKNOWN')
-            line_items = recon_report.get('line_items', [])
             
-            # 1. Skip if documents are missing (The 3-Way Rule)
+            # 1. Skip if waiting for docs
             if status == "WAITING_FOR_DOCS":
-                logger.info(f"Skipping {po_number}: {recon_report.get('details')}")
                 continue
 
-            # 2. Skip if incomplete
+            # 2. Logic Mismatch Check (e.g. 3-1 vs Line Item 3)
+            if status == "MISMATCH" or status == "DATA_DISCREPANCY":
+                reason = recon_report.get('details', 'Line Item Mismatch detected')
+                self._quarantine_bundle(po_number, sorted_files, reason)
+                continue
+
+            # 3. CRITICAL FIX: STOP PARTIAL DELIVERIES 
+            # If the reconciler says INCOMPLETE, we must NOT merge.
             if status == "INCOMPLETE":
-                logger.warning(f"Skipping merge for {po_number}: Partial delivery.")
-                continue
+                logger.warning(f"⛔ Skipping merge for {po_number}: Partial delivery ({recon_report.get('details')}).")
+                continue # <--- THIS LINE SAVES YOU FROM MERGING PARTIALS
             
-            # 3. Skip if PO Extraction Failed
-            if status == "PO_DATA_MISSING":
-                logger.warning(f"Skipping merge for {po_number}: PO line items were not extracted.")
+            # 4. Handle Ghost Matches (0 items matched)
+            if status == "MATCH" and not recon_report.get('line_items'):
+                logger.warning(f"Skipping {po_number}: Ghost Match (No items extracted).")
                 continue
 
-            # 4. CRITICAL FIX: Skip "Ghost Matches" (Empty vs Empty)
-            if status == "MATCH" and not line_items:
-                logger.warning(f"Skipping merge for {po_number}: No items extracted from ANY document (Ghost Match).")
-                continue
-
-            # 5. Warn but allow merge if it's just weird extra items
-            if status == "ATTENTION":
-                logger.warning(f"Merging {po_number} with warnings (Unsolicited items).")
-
+            # 4. Proceed to Merge
             try:
                 merger = PdfWriter()
                 file_paths_used = []
@@ -217,4 +280,5 @@ class PipelineOrchestrator:
 
             except Exception as e:
                 logger.error(f"Failed to merge bundle for PO {po_number}: {e}")
-    
+                # Optional: Quarantine on merge crash?
+                # self._quarantine_bundle(po_number, sorted_files, f"Merge Crash: {e}")

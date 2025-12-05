@@ -14,7 +14,7 @@ class PatternConfig:
 
     def _load_patterns(self):
         if not os.path.exists(self.filepath):
-            logger.error(f"❌ CRITICAL: Pattern file NOT found at: {self.filepath}")
+            logger.error(f"CRITICAL: Pattern file NOT found at: {self.filepath}")
             logger.error("   (Please ensure patterns.yaml is in the project root)")
             return {}
         
@@ -25,7 +25,7 @@ class PatternConfig:
                 # --- DEBUG LOG ---
                 # This proves if we actually loaded anything
                 count = len(data.get('document_types', {}))
-                logger.info(f"✅ Loaded {count} document categories from {self.filepath}")
+                logger.info(f"Loaded {count} document categories from {self.filepath}")
                 return data
                 
         except Exception as e:

@@ -1,0 +1,40 @@
+extract_po_number: |
+  Extract the Purchase Order (PO) Number.
+  Look for labels like "PO Number", "Order #", "P.O.", "Procurement Ref".
+  Return ONLY JSON: {"po_number": "value"}
+  If NOT found, return {"po_number": null}
+
+extract_line_items_crop: |
+  Extract table rows into a JSON list.
+  
+  ⛔ NEGATIVE CONSTRAINTS:
+  1. IGNORE "Hazardous Materials", "Prohibited Substances", "Terms and Conditions".
+  
+  ✅ POSITIVE EXTRACTION RULES (STRICT PRIORITY FOR LINE NUMBER):
+  1. **HIGHEST PRIORITY:** Look inside the 'Description' text. If you see patterns like "Line Item - X", "PO Line X", or "Item No: X", **YOU MUST USE 'X'** as the `line_ref`.
+     - Example: If Description is "Drill Bit (Line Item - 5)" and SL column says "1", extracted line_ref MUST be "5".
+  2. **SECOND PRIORITY:** If no line number is in the text, look for a specific column labeled "Line" or "Item".
+  3. **LOWEST PRIORITY:** Use 'SL', 'No', or 'SNO' columns only if the above two are missing.
+  4. IGNORE columns labeled "Rel", "Release", or "Rev".
+  
+  Output JSON list: [{"line_ref": "5", "description": "Item Name", "part_no": "123", "quantity": "4"}]
+
+extract_line_items_full_page: |
+  Analyze this document. Identify the main table.
+  
+  ⛔ NEGATIVE CONSTRAINTS:
+  1. IGNORE "Hazardous Materials", "Prohibited Substances", "Terms and Conditions".
+  
+  ✅ POSITIVE EXTRACTION RULES (STRICT PRIORITY FOR LINE NUMBER):
+  1. **HIGHEST PRIORITY:** Look inside the 'Description' text. If you see patterns like "Line Item - X", "PO Line X", or "Item No: X", **YOU MUST USE 'X'** as the `line_ref`.
+     - Example: If Description is "Drill Bit (Line Item - 5)" and SL column says "1", extracted line_ref MUST be "5".
+  2. **SECOND PRIORITY:** If no line number is in the text, look for a specific column labeled "Line" or "Item".
+  3. **LOWEST PRIORITY:** Use 'SL', 'No', or 'SNO' columns only if the above two are missing.
+  4. IGNORE columns labeled "Rel", "Release", or "Rev".
+  
+  Output JSON list: [{"line_ref": "5", "description": "Item Name", "part_no": "123", "quantity": "4"}]
+  Return [] if no valid table is found.
+
+classify_document: |
+  Classify this document image. Return ONLY one string:
+  "purchase_order", "delivery_note", "sales_invoice", or "unknown".
