@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  automated_merger:
+    build: .
+    container_name: receipt_bot
+    restart: unless-stopped
+    volumes:
+      # 1. Configuration (Secrets)
+      - ./config.txt:/app/config.txt
+      - ./prompts.yaml:/app/prompts.yaml  # Allow editing prompts without rebuilding!
+      - ./patters.yaml:/app/patterns.yaml
+      
+      # 2. Input Folders
+      - ./Purchase_order:/app/Purchase_order
+      - ./Delivery_note:/app/Delivery_note
+      - ./Sales_invoice:/app/Sales_invoice
+      
+      # 3. Output Folders
+      - ./Merged_PDFs:/app/Merged_PDFs
+      - ./reports:/app/reports
+      - ./quarantine:/app/quarantine
+      
+      # 4. Persistence (Database & Cache)
+      - ./gemini_cache:/app/gemini_cache
+      - ./merger_state.db:/app/merger_state.db
