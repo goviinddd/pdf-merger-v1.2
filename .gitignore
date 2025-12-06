@@ -42,7 +42,3 @@ debug_yolo_crops/
 *.jpg
 *.xlsx
 
-# --- Optional: Large Models ---
-# If your .pt file is >100MB, GitHub will reject it. 
-# Uncomment below if you can't push the model.
-# *.pt
