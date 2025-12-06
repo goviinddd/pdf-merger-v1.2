@@ -37,7 +37,6 @@ debug_yolo_crops/
 *.log
 .env
 .DS_Store
-*.pdf
 *.png
 *.jpg
 *.xlsx
