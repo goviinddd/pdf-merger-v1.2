@@ -4,6 +4,7 @@ import os
 import shutil
 import datetime
 import json
+import magic
 from typing import List, Dict
 from pypdf import PdfWriter, PdfReader
 
@@ -105,6 +106,38 @@ class PipelineOrchestrator:
                 except Exception as e:
                     logger.error(f"Failed to move {src} to bundle quarantine: {e}")
 
+    def _is_safe_pdf(self, file_path):
+        """
+        Validates file integrity using Magic Bytes (Hex Signature).
+        Prevents processing of renamed .exe files or other malicious files.
+        """
+        filename = os.path.basename(file_path)
+        
+        try:
+            # 1. Size Check (DoS Protection)
+            # Limit to 50MB (Adjust if you deal with massive blueprints)
+            max_size_mb = 50
+            file_size = os.path.getsize(file_path)
+            
+            if file_size > max_size_mb * 1024 * 1024:
+                logger.error(f"⛔ Security: {filename} is too large ({file_size/1024/1024:.2f} MB). Skipping.")
+                return False
+            # 2. Magic Byte Check (Anti-Spoofing)
+            # Reads the actual file header bits, ignoring the extension
+            detected_type = magic.from_file(file_path, mime=True)
+            
+            if detected_type != 'application/pdf':
+                logger.critical(f"Security: SPOOF DETECTED! {filename} is actually '{detected_type}', not a PDF.")
+                
+                self._quarantine_file(file_path, f"Security Risk: Fake PDF. Actual type: {detected_type}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Security check failed for {filename}: {e}")
+            return False
+        
     def _step_scan_inputs(self):
         logger.info("Scanning input directories...")
         found_files = self.fs.scan_and_rename()
@@ -125,6 +158,10 @@ class PipelineOrchestrator:
             if not os.path.exists(file_path):
                 logger.warning(f"File vanished: {file_path}. Marking as FAILED.")
                 self.db.update_status(file_path, 'FAILED', error="File Not Found on Disk")
+                continue
+
+            if not self._is_safe_pdf(file_path):
+                self.db.update_status(file_path, 'FAILED', error="Security Validation Failed")
                 continue
 
             # --- AUTO-CORRECTION LOGIC ---
@@ -247,18 +284,14 @@ class PipelineOrchestrator:
                 self._quarantine_bundle(po_number, sorted_files, reason)
                 continue
 
-            # 3. CRITICAL FIX: STOP PARTIAL DELIVERIES 
-            # If the reconciler says INCOMPLETE, we must NOT merge.
             if status == "INCOMPLETE":
                 logger.warning(f"⛔ Skipping merge for {po_number}: Partial delivery ({recon_report.get('details')}).")
-                continue # <--- THIS LINE SAVES YOU FROM MERGING PARTIALS
+                continue 
             
-            # 4. Handle Ghost Matches (0 items matched)
             if status == "MATCH" and not recon_report.get('line_items'):
                 logger.warning(f"Skipping {po_number}: Ghost Match (No items extracted).")
                 continue
 
-            # 4. Proceed to Merge
             try:
                 merger = PdfWriter()
                 file_paths_used = []

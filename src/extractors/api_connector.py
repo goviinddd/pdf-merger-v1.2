@@ -12,7 +12,7 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from PIL import Image
 from src.core.pattern_loader import pattern_config  
 from src.core.config_loader import settings
-from src.core.prompt_loader import PromptLoader 
+from src.core.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +20,12 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = "gemini_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# Settings
+CACHE_TTL_DAYS = 7        # Delete files older than 7 days
+MIN_REQUEST_INTERVAL = 4.0 # Rate limit buffer
+
+# Rate Limiting Globals
 LAST_CALL_TIME = 0
-MIN_REQUEST_INTERVAL = 4.0 
 
 # --- LOAD SETTINGS ---
 try:
@@ -34,7 +38,35 @@ except Exception as e:
     API_KEY = None
     ACTIVE_MODELS = []
 
-# --- CACHING & HELPERS ---
+# =========================================================
+#                   CACHE MECHANICS
+# =========================================================
+
+def _prune_cache():
+    """
+    Housekeeping: Deletes cache files older than CACHE_TTL_DAYS.
+    Runs silently on module import.
+    """
+    try:
+        now = time.time()
+        cutoff = now - (CACHE_TTL_DAYS * 86400)
+        deleted = 0
+        
+        for f in os.listdir(CACHE_DIR):
+            fpath = os.path.join(CACHE_DIR, f)
+            if os.path.isfile(fpath) and f.endswith(".json"):
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+                    deleted += 1
+        
+        if deleted > 0:
+            logger.info(f"Cache Maintenance: Removed {deleted} stale files (> {CACHE_TTL_DAYS} days old).")
+    except Exception as e:
+        logger.warning(f"Cache prune warning: {e}")
+
+# Run cleanup immediately when module loads
+_prune_cache()
+
 def _get_file_hash(file_path):
     hasher = hashlib.md5()
     with open(file_path, 'rb') as f:
@@ -42,9 +74,20 @@ def _get_file_hash(file_path):
             hasher.update(chunk)
     return hasher.hexdigest()
 
-def _get_cache_path(file_hash, operation_tag, page_index=None):
+def _get_prompt_hash(prompt_text):
+    """Generates a short hash of the prompt instructions."""
+    return hashlib.md5(prompt_text.encode('utf-8')).hexdigest()[:8]
+
+def _get_cache_path(file_hash, prompt_text, operation_tag, page_index=None):
+    """
+    Constructs a cache filename including the PROMPT HASH.
+    This ensures that if you edit prompts.yaml, the cache invalidates automatically.
+    """
+    prompt_sig = _get_prompt_hash(prompt_text)
     suffix = f"_p{page_index}" if page_index is not None else ""
-    return os.path.join(CACHE_DIR, f"{file_hash}_{operation_tag}{suffix}.json")
+    # Format: [FileHash]_[PromptHash]_[Tag].json
+    filename = f"{file_hash}_{prompt_sig}_{operation_tag}{suffix}.json"
+    return os.path.join(CACHE_DIR, filename)
 
 def _load_from_cache(cache_path):
     if os.path.exists(cache_path):
@@ -62,6 +105,7 @@ def _save_to_cache(cache_path, data):
             json.dump(data, f, indent=2)
     except: pass
 
+# --- RATE LIMITER ---
 def _enforce_rate_limit():
     global LAST_CALL_TIME
     elapsed = time.time() - LAST_CALL_TIME
@@ -87,16 +131,20 @@ def _generate_with_retry(model, content, config=None, safety_settings=None, max_
 
 def extract_po_number(file_path: str):
     if not API_KEY: return None
+    
+    # Load Prompt
+    prompt = PromptLoader.get("extract_po_number")
+    
+    # Check Cache (Now includes prompt hash)
     file_hash = _get_file_hash(file_path)
-    cache_path = _get_cache_path(file_hash, "po_num")
+    cache_path = _get_cache_path(file_hash, prompt, "po_num")
     
     cached = _load_from_cache(cache_path)
     if cached: return cached
 
-    prompt = PromptLoader.get("extract_po_number")
     gen_config = {"response_mime_type": "application/json", "temperature": 0.0}
-
     result_val = None
+    
     try:
         pdf = pdfium.PdfDocument(file_path)
         if len(pdf) > 0:
@@ -117,7 +165,8 @@ def extract_po_number(file_path: str):
     return result_val
 
 def extract_line_items_from_crop(image: Image.Image):
-    # UPDATED PROMPT: Text Priority
+    # NOTE: We cannot easily hash an in-memory image for caching without saving it first.
+    # For crop extraction, we skip disk caching to maintain speed, relying on Rate Limiting.
     prompt = PromptLoader.get("extract_line_items_crop")
     
     safety_settings = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE}
@@ -134,13 +183,14 @@ def extract_line_items_from_crop(image: Image.Image):
 def extract_line_items_full_page(file_path: str, page_index=0):
     if not API_KEY: return "[]"
     
+    prompt = PromptLoader.get("extract_line_items_full_page")
+    
     file_hash = _get_file_hash(file_path)
-    cache_path = _get_cache_path(file_hash, "full_table", page_index)
+    cache_path = _get_cache_path(file_hash, prompt, "full_table", page_index)
+    
     cached = _load_from_cache(cache_path)
     if cached: return cached
 
-    prompt = PromptLoader.get("extract_line_items_full_page")
-    
     gen_config = {"response_mime_type": "application/json", "temperature": LLM_CONFIG['temperature']}
     
     result_json = "[]"
@@ -160,6 +210,7 @@ def extract_line_items_full_page(file_path: str, page_index=0):
     return result_json
 
 def classify_document_type(file_path: str) -> str:
+    # Regex Phase (Fast)
     try:
         reader = PdfReader(file_path)
         if len(reader.pages) > 0:
@@ -173,26 +224,28 @@ def classify_document_type(file_path: str) -> str:
 
     if not API_KEY: return "unknown"
     
+    prompt = PromptLoader.get("classify_document")
+    
     file_hash = _get_file_hash(file_path)
-    cache_path = _get_cache_path(file_hash, "classification")
+    cache_path = _get_cache_path(file_hash, prompt, "classification")
+    
     cached = _load_from_cache(cache_path)
     if cached: return cached
 
-    prompt = PromptLoader.get("classify_document")
-    
     result_type = "unknown"
     try:
         pdf = pdfium.PdfDocument(file_path)
-        image = pdf[0].render(scale=1).to_pil().convert("RGB")
-        for model_name in ACTIVE_MODELS:
-            model = genai.GenerativeModel(model_name)
-            resp = _generate_with_retry(model, [prompt, image])
-            if resp and resp.text:
-                clean = resp.text.lower().strip().replace('"','').replace("'", "")
-                if "purchase" in clean: result_type = "purchase_order"
-                elif "delivery" in clean: result_type = "delivery_note"
-                elif "invoice" in clean: result_type = "sales_invoice"
-                break
+        if len(pdf) > 0:
+            image = pdf[0].render(scale=1).to_pil().convert("RGB")
+            for model_name in ACTIVE_MODELS:
+                model = genai.GenerativeModel(model_name)
+                resp = _generate_with_retry(model, [prompt, image])
+                if resp and resp.text:
+                    clean = resp.text.lower().strip().replace('"','').replace("'", "")
+                    if "purchase" in clean: result_type = "purchase_order"
+                    elif "delivery" in clean: result_type = "delivery_note"
+                    elif "invoice" in clean: result_type = "sales_invoice"
+                    break
     except: pass
 
     _save_to_cache(cache_path, result_type)

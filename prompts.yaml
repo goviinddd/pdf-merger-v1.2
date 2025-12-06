@@ -6,34 +6,33 @@ extract_po_number: |
 
 extract_line_items_crop: |
   Extract table rows into a JSON list.
-  
-  ⛔ NEGATIVE CONSTRAINTS:
-  1. IGNORE "Hazardous Materials", "Prohibited Substances", "Terms and Conditions".
-  
-  ✅ POSITIVE EXTRACTION RULES (STRICT PRIORITY FOR LINE NUMBER):
-  1. **HIGHEST PRIORITY:** Look inside the 'Description' text. If you see patterns like "Line Item - X", "PO Line X", or "Item No: X", **YOU MUST USE 'X'** as the `line_ref`.
-     - Example: If Description is "Drill Bit (Line Item - 5)" and SL column says "1", extracted line_ref MUST be "5".
-  2. **SECOND PRIORITY:** If no line number is in the text, look for a specific column labeled "Line" or "Item".
-  3. **LOWEST PRIORITY:** Use 'SL', 'No', or 'SNO' columns only if the above two are missing.
-  4. IGNORE columns labeled "Rel", "Release", or "Rev".
-  
-  Output JSON list: [{"line_ref": "5", "description": "Item Name", "part_no": "123", "quantity": "4"}]
+    
+    ⛔ NEGATIVE CONSTRAINTS:
+    1. IGNORE "Hazardous Materials", "Prohibited Substances", "Terms and Conditions".
+    2. IGNORE columns labeled "Item No" if they contain long codes (e.g., 5060800...). That is a Part Number, NOT a Line Number.
+    
+    ✅ POSITIVE EXTRACTION RULES (STRICT PRIORITY FOR LINE NUMBER):
+    1. **HIGHEST PRIORITY:** Look inside the 'Description' text. If you see "Line Item - X", use 'X'.
+    2. **SECOND PRIORITY:** Look for a simple column labeled "Line" or "No" that contains small integers (1, 2, 3 or 1-1, 1-2, 1-3).
+    3. **CRITICAL:** Do NOT use the "Item No" or "Part No" column as the line reference.
+    
+    Output JSON list: [{"line_ref": "2", "description": "Item Name", "part_no": "5060900...", "quantity": "4"}]
+    """
 
 extract_line_items_full_page: |
   Analyze this document. Identify the main table.
-  
-  ⛔ NEGATIVE CONSTRAINTS:
-  1. IGNORE "Hazardous Materials", "Prohibited Substances", "Terms and Conditions".
-  
-  ✅ POSITIVE EXTRACTION RULES (STRICT PRIORITY FOR LINE NUMBER):
-  1. **HIGHEST PRIORITY:** Look inside the 'Description' text. If you see patterns like "Line Item - X", "PO Line X", or "Item No: X", **YOU MUST USE 'X'** as the `line_ref`.
-     - Example: If Description is "Drill Bit (Line Item - 5)" and SL column says "1", extracted line_ref MUST be "5".
-  2. **SECOND PRIORITY:** If no line number is in the text, look for a specific column labeled "Line" or "Item".
-  3. **LOWEST PRIORITY:** Use 'SL', 'No', or 'SNO' columns only if the above two are missing.
-  4. IGNORE columns labeled "Rel", "Release", or "Rev".
-  
-  Output JSON list: [{"line_ref": "5", "description": "Item Name", "part_no": "123", "quantity": "4"}]
-  Return [] if no valid table is found.
+    
+    ⛔ NEGATIVE CONSTRAINTS:
+    1. IGNORE "Hazardous Materials", "Prohibited Substances", "Terms and Conditions".
+    2. IGNORE columns labeled "Item No" if they contain long codes (e.g., 5060800...). That is a Part Number, NOT a Line Number.
+    
+    ✅ POSITIVE EXTRACTION RULES (STRICT PRIORITY FOR LINE NUMBER):
+    1. **HIGHEST PRIORITY:** Look inside the 'Description' text. If you see "Line Item - X", use 'X'.
+    2. **SECOND PRIORITY:** Look for a simple column labeled "Line", "No", "SNO", or "Sl No" that contains small integers (1, 2, 3).
+    3. **CRITICAL:** Do NOT use the "Item No" or "Part No" column as the line reference.
+    
+    Output JSON list: [{"line_ref": "2", "description": "Item Name", "part_no": "5060900...", "quantity": "4"}]
+    Return [] if no valid table is found.
 
 classify_document: |
   Classify this document image. Return ONLY one string:

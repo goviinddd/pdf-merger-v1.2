@@ -1,26 +1,15 @@
-# --- Core Image Processing ---
 pillow
 opencv-python-headless
 pdf2image
 pypdfium2
 pypdf
-
-# --- AI & Vision ---
 ultralytics
 rapidocr-onnxruntime
 google-generativeai
-
-# --- GUI & Configuration (NEW) ---
 ttkbootstrap
 PyYAML
-
-# --- Data & Reporting ---
 pandas
 openpyxl
-
-# --- Utilities ---
 python-dotenv
 reportlab
-
-# --- Legacy / Optional ---
 pdfplumber
