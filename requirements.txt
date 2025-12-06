@@ -13,3 +13,4 @@ openpyxl
 python-dotenv
 reportlab
 pdfplumber
+python-magic

@@ -9,7 +9,7 @@ services:
       # 1. Configuration (Secrets)
       - ./config.txt:/app/config.txt
       - ./prompts.yaml:/app/prompts.yaml  # Allow editing prompts without rebuilding!
-      - ./patters.yaml:/app/patterns.yaml
+      - ./patterns.yaml:/app/patterns.yaml
       
       # 2. Input Folders
       - ./Purchase_order:/app/Purchase_order

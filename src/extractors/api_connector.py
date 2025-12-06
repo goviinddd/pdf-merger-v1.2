@@ -89,6 +89,7 @@ def _get_cache_path(file_hash, prompt_text, operation_tag, page_index=None):
     filename = f"{file_hash}_{prompt_sig}_{operation_tag}{suffix}.json"
     return os.path.join(CACHE_DIR, filename)
 
+            
 def _load_from_cache(cache_path):
     if os.path.exists(cache_path):
         try:
