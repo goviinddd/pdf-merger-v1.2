@@ -1,0 +1,45 @@
+# ==============================================================================
+# APPLICATION CONFIGURATION
+# ==============================================================================
+# Instructions:
+# 1. Edit the values below to match your setup.
+# 2. Lines starting with # are comments and will be ignored.
+# 3. Save this file and restart the application for changes to take effect.
+# ==============================================================================
+
+[API_KEYS]
+GROQ_API_KEY = 
+
+[LLM_SETTINGS]
+# Which model to use? (e.g., gemini-2.5-flash-lite, gemini-1.5-pro, gpt-4o)
+model_name=meta-llama/llama-4-scout-17b-16e-instruct
+
+# Creativity level (0.0 is precise/robotic, 1.0 is creative/random)
+TEMPERATURE = 0.7
+
+# maximum number of tokens to generate (limits response length)
+MAX_OUTPUT_TOKENS = 2048
+
+# Context window memory (how many previous messages the AI remembers)
+# Set to 0 to disable memory.
+MEMORY_TURNS = 10
+
+[HARDWARE]
+
+# FORCE_CPU: Set to 'True' if you experience crashes or don't have a dedicated GPU.
+# Set to 'False' to try and use CUDA (Nvidia) or MPS (Mac).
+FORCE_CPU = True
+
+# QUANTIZATION: Reduces memory usage but slightly lowers quality.
+# Options: none, 8bit, 4bit (Requires bitsandbytes installed)
+QUANTIZATION_MODE = 4bit
+
+[SYSTEM]
+# Where to save logs and outputs
+OUTPUT_DIR = ./outputs
+
+# LOG_LEVEL: DEBUG, INFO, WARNING, ERROR
+LOG_LEVEL = INFO
+
+# Set to True to save a transcript of the conversation to a text file
+SAVE_TRANSCRIPT = True

@@ -1,0 +1,28 @@
+# --- Core AI & Vision ---
+groq
+ultralytics
+rapidocr-onnxruntime
+opencv-python-headless
+pillow
+
+# --- PDF Tools ---
+pypdf
+pypdfium2
+pdf2image
+pdfplumber
+reportlab
+
+# --- GUI & Config ---
+ttkbootstrap
+PyYAML
+python-dotenv
+
+# --- Data Handling ---
+pandas
+openpyxl
+
+# --- System & Security ---
+python-magic; sys_platform != 'win32'
+python-magic-bin; sys_platform == 'win32'
+
+# (Note: google-generativeai is REMOVED)
