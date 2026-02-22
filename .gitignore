@@ -1,0 +1,13 @@
+Purchase_order/
+Archive/
+Delivery_note/
+groq_cache/
+Merged_PDFS/
+quarantine/
+reports/
+venv/
+Sales_invoice/
+test files/
+merger_state.db
+merger_system.log
+pdfmerger.rar

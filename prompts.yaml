@@ -1,0 +1,88 @@
+# --- SYSTEM PROMPTS ---
+
+extract_po_number: |
+  ROLE: Data Extraction Specialist.
+  TASK: Extract the primary Document Reference Number (Purchase Order Number OR Invoice Number).
+  OUTPUT: JSON Object only.
+  SCHEMA: {"po_number": "value"}
+
+  ✅ SEARCH PRIORITY (Order of Importance):
+  1. **Primary Target:** Look for labels like "PO Number", "Order #", "P.O.", "Procurement Ref".
+  2. **Location Hint:** These numbers are usually in the **TOP RIGHT** or **TOP LEFT** of the page.
+
+  ⚠️ CONFLICT RESOLUTION (CRITICAL):
+  - If the document contains **BOTH** an "Order #" (e.g., 126.120224) and a "PO" (e.g., 161772):
+    - **PREFER** the "Order #" / "Invoice #" if it is the main header or at the top right.
+    - **IGNORE** the "PO" if it appears in a smaller "Reference" or "Consignee" box.
+    
+  ⛔ NEGATIVE CONSTRAINTS (CRITICAL):
+  - **NEVER** return table headers like "DESCRIPTION", "CODE", "QTY", "Item", "Date", "Bill To".
+  - **NEVER** return the company name (e.g., "raas").
+  - If the only text found is a header like "DESCRIPTION", return {"po_number": null}.
+
+  FINAL INSTRUCTION: Return ONLY the JSON object. Do not include markdown or conversational text.
+
+extract_line_items_crop: |
+  TASK: Extract table rows from this cropped image.
+  OUTPUT: JSON Object with a single key "items".
+  
+  CRITICAL SCHEMA:
+  {
+    "items": [
+      {
+        "line_ref": "1", 
+        "description": "Item Name", 
+        "part_no": "5060900...", 
+        "quantity": "Number ONLY. Exclude units like 'box', 'each', 'pcs', 'ea'. If text is '1.00 box', return '1.00'."
+      }
+    ]
+  }
+
+  ⛔ NEGATIVE CONSTRAINTS:
+  1. IGNORE rows containing "Hazardous Materials", "Prohibited Substances", "Terms and Conditions".
+  2. IGNORE columns labeled "Item No" or "Code" if they contain LONG CODES (e.g., 5060800...). That is a Part Number, NOT a Line Number.
+
+  ✅ POSITIVE EXTRACTION RULES (STRICT PRIORITY FOR 'line_ref'):
+  1. **HIGHEST PRIORITY:** Look inside the 'Description' text. If you see "Line Item - X", use 'X' as line_ref.
+  2. **SECOND PRIORITY:** Look for a simple column labeled "Line", "No", "SNO" or "Sl No" containing small integers (1, 2, 3).
+  3. **CRITICAL:** Do NOT use the "Item No" or "Part No" column as the line reference.
+
+  FINAL INSTRUCTION: Return ONLY the JSON object.
+
+extract_line_items_full_page: |
+  TASK: Identify the main product table and extract rows.
+  OUTPUT: JSON Object with a single key "items".
+  
+  CRITICAL SCHEMA:
+  {
+    "items": [
+      {
+        "line_ref": "1", 
+        "description": "Item Name", 
+        "part_no": "Code", 
+        "quantity": "Number ONLY. Exclude units like 'box', 'each', 'pcs', 'ea'. If text is '1.00 box', return '1.00'."
+      }
+    ]
+  }
+  
+  ⛔ NEGATIVE CONSTRAINTS:
+  1. IGNORE "Hazardous Materials", "Prohibited Substances", "Terms and Conditions".
+  2. IGNORE columns labeled "Item No" if they contain LONG CODES (e.g., 5060800...). That is a Part Number.
+  
+  ✅ POSITIVE EXTRACTION RULES (STRICT PRIORITY FOR 'line_ref'):
+  1. **HIGHEST PRIORITY:** Look inside 'Description' text for "Line Item - X". Use 'X'.
+  2. **SECOND PRIORITY:** Look for a simple column labeled "Line", "No", "SNO", or "Sl No" (small integers).
+  3. **CRITICAL:** Do NOT use the "Item No" or "Part No" column as the line reference.
+  
+  If no table exists, return {"items": []}.
+  FINAL INSTRUCTION: Return ONLY the JSON object.
+
+classify_document: |
+  Classify this document.
+  Return JSON: {"type": "value"}
+  Values must be one of: "purchase_order", "delivery_note", "sales_invoice", "unknown".
+  
+  RULES:
+  - If it says "Invoice" or "Commercial Invoice", return "sales_invoice".
+  - If it says "Purchase Order" or "PO", return "purchase_order".
+  - If it says "Delivery Note", "Packing List", or "Dispatch Note", return "delivery_note".
